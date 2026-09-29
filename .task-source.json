@@ -1,0 +1,184 @@
+{
+  "task_source_schema_version": 1,
+  "entities": [
+    {
+      "id": "specimen",
+      "label": "标本",
+      "relations": [
+        "prep_plan.specimen_id belongs_to specimen.id",
+        "release_record.specimen_id belongs_to specimen.id"
+      ],
+      "invariants": [
+        "目录号唯一",
+        "状态只沿登记、方案、制备、稳定、可借阅顺序推进",
+        "至少有一个野外标签",
+        "放行后不能重新进入制备"
+      ]
+    },
+    {
+      "id": "prep_plan",
+      "label": "修复方案",
+      "relations": [
+        "prep_plan.specimen_id belongs_to specimen.id",
+        "progress_entry.plan_id belongs_to prep_plan.id"
+      ],
+      "invariants": [
+        "一份标本同时最多有一个未结束方案",
+        "只有草稿可以审批",
+        "完成后不能继续追加进度",
+        "审批人和审批时间同时写入"
+      ]
+    },
+    {
+      "id": "progress_entry",
+      "label": "制备进度",
+      "relations": [
+        "progress_entry.plan_id belongs_to prep_plan.id"
+      ],
+      "invariants": [
+        "比例位于零到一百之间",
+        "比例不得低于上一条记录",
+        "序号连续递增",
+        "完成后不可追加"
+      ]
+    },
+    {
+      "id": "release_record",
+      "label": "研究放行记录",
+      "relations": [
+        "release_record.specimen_id belongs_to specimen.id"
+      ],
+      "invariants": [
+        "每份标本最多生成一条放行记录",
+        "只有稳定标本可以放行",
+        "存在未结束方案时不得放行"
+      ]
+    }
+  ],
+  "state_machines": [
+    {
+      "subject": "specimen",
+      "states": [
+        "registered",
+        "planned",
+        "preparing",
+        "stabilized",
+        "available"
+      ],
+      "transitions": [
+        "registered->planned",
+        "planned->preparing",
+        "preparing->stabilized",
+        "stabilized->available"
+      ],
+      "invariants": [
+        "available 是终态",
+        "每次转换递增版本号",
+        "方案创建与 planned 标记必须原子提交"
+      ]
+    },
+    {
+      "subject": "prep_plan",
+      "states": [
+        "draft",
+        "approved",
+        "active",
+        "completed",
+        "cancelled"
+      ],
+      "transitions": [
+        "draft->approved",
+        "approved->active",
+        "active->completed",
+        "draft->cancelled"
+      ],
+      "invariants": [
+        "completed 和 cancelled 不可回退",
+        "只有 draft 可以审批",
+        "第一条进度把 approved 推进为 active",
+        "一百百分比与 completed 在同一提交内生效"
+      ]
+    }
+  ],
+  "capability_families": [
+    {
+      "family": "状态机与流转",
+      "occupied_by": [
+        "specimen_status_transitions",
+        "prep_plan_status_transitions"
+      ],
+      "available": false
+    },
+    {
+      "family": "并发与锁",
+      "occupied_by": [
+        "repository_mutation_copies"
+      ],
+      "available": true
+    },
+    {
+      "family": "资源生命周期",
+      "occupied_by": [
+        "single_open_plan_and_release_record"
+      ],
+      "available": true
+    },
+    {
+      "family": "错误传播",
+      "occupied_by": [
+        "stable_http_error_codes"
+      ],
+      "available": true
+    },
+    {
+      "family": "恢复与回滚",
+      "occupied_by": [],
+      "available": true
+    }
+  ],
+  "extension_seams": [
+    {
+      "id": "progress-history-view",
+      "anchor": "PrepPlan.Version and ordered progress entries",
+      "entry": "GET /plans/{id}",
+      "distinct_outcome": "返回带版本和阶段序列的完整进度轨迹，而不只是最新比例",
+      "mechanism": "ordered_projection"
+    },
+    {
+      "id": "hold-and-resume",
+      "anchor": "Specimen status on_hold transition",
+      "entry": "current plan approval workflow",
+      "distinct_outcome": "增加有条件的暂停与恢复流程，并禁止暂停期间写入进度",
+      "mechanism": "guarded_state_transition"
+    },
+    {
+      "id": "release-revocation",
+      "anchor": "ReleaseRecord and available terminal state",
+      "entry": "POST /specimens/{id}/release",
+      "distinct_outcome": "增加只允许当前放行记录撤销且保留原记录的补偿流程",
+      "mechanism": "compensating_lifecycle"
+    }
+  ],
+  "tension_points": [
+    {
+      "workflow_id": "register-specimen",
+      "description": "重复目录号既可以按幂等成功处理，也可以按唯一身份冲突处理；当前业务要求保留首个标本并拒绝覆盖",
+      "observable_failure": "第二次登记返回成功但悄悄替换了野外标签或基质类型"
+    },
+    {
+      "workflow_id": "approve-prep-plan",
+      "description": "方案创建和标本进入 planned 必须成对发生，而审批又要把方案和标本同时推进；任一步单独提交都会留下不可恢复的中间状态",
+      "observable_failure": "出现 planned 标本但没有方案，或方案已审批而标本仍停留在 registered"
+    },
+    {
+      "workflow_id": "log-preparation",
+      "description": "进度记录既要保持单调，又要在百分之一百时同时关闭方案并稳定标本；先写记录或先改状态都会产生互相矛盾的可读快照",
+      "observable_failure": "方案显示 completed 但最后一条进度小于一百，或标本稳定后仍能追加进度"
+    },
+    {
+      "workflow_id": "release-for-study",
+      "description": "放行的前置条件是标本稳定且方案闭合；只检查当前状态会漏掉已取消或异常悬挂的历史方案，只检查方案会放过尚未稳定的标本",
+      "observable_failure": "未稳定标本获得放行记录，或放行后仍能继续写入旧方案进度"
+    }
+  ]
+}

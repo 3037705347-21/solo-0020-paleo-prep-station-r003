@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "name": "paleo-prep-station",
+  "project_shape": "backend",
+  "language": "go",
+  "modules": [
+    {
+      "id": "entrypoint",
+      "path": "cmd/paleo-prep-station",
+      "responsibility": "HTTP process entrypoint, listener configuration, and graceful shutdown"
+    },
+    {
+      "id": "runtimecheck",
+      "path": "cmd/workflowcheck",
+      "responsibility": "bounded HTTP workflow checks for local verification"
+    },
+    {
+      "id": "httpapi",
+      "path": "internal/httpapi",
+      "responsibility": "routing, JSON boundaries, and status mapping"
+    },
+    {
+      "id": "station",
+      "path": "internal/station",
+      "responsibility": "cross-aggregate workflow orchestration and atomic commit boundaries"
+    },
+    {
+      "id": "domain",
+      "path": "internal/domain",
+      "responsibility": "entities, invariants, and state transitions"
+    },
+    {
+      "id": "repository",
+      "path": "internal/repository",
+      "responsibility": "mutex-protected in-memory persistence with atomic commits"
+    },
+    {
+      "id": "contracts",
+      "path": "internal/contracts",
+      "responsibility": "public requests and stable error contracts"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "register-specimen",
+      "name": "Register specimen",
+      "entry": "POST /specimens",
+      "steps": [
+        "decode and validate the public request",
+        "apply specimen identity and status invariants",
+        "commit the new specimen without replacing an existing catalog number"
+      ],
+      "success": "returns the registered specimen and a readable snapshot",
+      "failure": "returns stable validation or duplicate catalog number errors",
+      "verification": "workflowcheck registers a specimen and reads it through GET /specimens/{id}",
+      "module_ids": [
+        "entrypoint",
+        "runtimecheck",
+        "httpapi",
+        "station",
+        "domain",
+        "repository",
+        "contracts"
+      ]
+    },
+    {
+      "id": "approve-prep-plan",
+      "name": "Approve preparation plan",
+      "entry": "POST /specimens/{id}/plans + POST /plans/{id}/approval",
+      "steps": [
+        "create one draft plan for an eligible specimen",
+        "validate the approver and current draft state",
+        "commit plan approval and specimen preparation in one repository mutation"
+      ],
+      "success": "returns an approved plan and a specimen in preparing status",
+      "failure": "returns conflict for an invalid specimen state or a second open plan",
+      "verification": "workflowcheck creates a plan, approves it, and verifies both plan and specimen states",
+      "module_ids": [
+        "entrypoint",
+        "runtimecheck",
+        "httpapi",
+        "station",
+        "domain",
+        "repository",
+        "contracts"
+      ]
+    },
+    {
+      "id": "log-preparation",
+      "name": "Log preparation progress",
+      "entry": "POST /plans/{id}/progress",
+      "steps": [
+        "load the approved plan and its ordered progress records",
+        "enforce monotonic percentages and completion rules",
+        "commit the entry and any terminal state changes together"
+      ],
+      "success": "returns the progress entry and marks the plan completed at one hundred percent",
+      "failure": "returns conflict for a non-monotonic percentage or work on a closed plan",
+      "verification": "workflowcheck records partial and final progress, then verifies completed plan and stabilized specimen states",
+      "module_ids": [
+        "entrypoint",
+        "runtimecheck",
+        "httpapi",
+        "station",
+        "domain",
+        "repository",
+        "contracts"
+      ]
+    },
+    {
+      "id": "release-for-study",
+      "name": "Release for study",
+      "entry": "POST /specimens/{id}/release",
+      "steps": [
+        "verify the specimen is stabilized",
+        "verify that no unfinished plan remains",
+        "create the permanent release record and mark the specimen available"
+      ],
+      "success": "returns the release record and makes the specimen available",
+      "failure": "returns conflict if the specimen is unstable or still has an unfinished plan",
+      "verification": "workflowcheck completes preparation, releases the specimen, and verifies the terminal state",
+      "module_ids": [
+        "entrypoint",
+        "runtimecheck",
+        "httpapi",
+        "station",
+        "domain",
+        "repository",
+        "contracts"
+      ]
+    }
+  ],
+  "complexity": {
+    "mechanisms": [
+      "state_transition",
+      "resource_lifetime",
+      "error_propagation",
+      "concurrency"
+    ],
+    "notes": "Plan and specimen state changes share one repository mutation; duplicate catalog numbers and unfinished plans are rejected at commit time."
+  }
+}
